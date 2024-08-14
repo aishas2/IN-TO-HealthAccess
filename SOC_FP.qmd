@@ -1,0 +1,591 @@
+---
+title: "SOC_FP"
+author: "Aisha Syed"
+format: html
+editor: visual
+---
+
+## Quarto
+
+Quarto enables you to weave together content and executable code into a finished document. To learn more about Quarto see <https://quarto.org>.
+
+## Running Code
+
+When you click the **Render** button a document will be generated that includes both content and the output of embedded code. You can embed code like this:
+
+```{r}
+#| echo: false
+# tidyverse
+library(tidyverse)
+library(ggpubr)
+library(fs)
+
+# statistics
+library(car)
+library(modelr)
+library(performance)
+library(modelsummary)
+library(see)
+library(DataExplorer)
+library(zoo)
+library(imputeTS)
+
+# spatial econ
+library(sf)
+library(spdep)
+library(sfdep)
+library(cancensus)
+library(spatialreg)
+library(spgwr)
+library(tmap)
+
+options(cancensus.api_key = "CensusMapper_f9ab9c536d9532418857bb70d03df16d")
+dir_create("./cache")
+options(cancensus.cache_path = "./cache")
+```
+
+```{r}
+census_datasets <- list_census_datasets()
+```
+
+```{r}
+mhhinc_variables <- find_census_vectors(
+  query = "immigrant",
+  dataset = "CA21",
+  # One of 'all' 'total' 'male' 'female'
+  type = "total",
+  query_type = "semantic"
+)
+```
+
+```{r}
+Bangladesh_2021 = "v_CA21_4617"
+SriLanka_2021 = "v_CA21_4626"
+Pakistan_2021 = "v_CA21_4623"
+India_2021 = "v_CA21_4620"
+mhinc = 'v_CA21_906'
+avg_homevalue = 'v_CA21_4312'
+num_employed = 'v_CA21_575'
+ec_imm = 'v_CA21_4833'
+fam_imm = 'v_CA21_4842'
+bach = 'v_CA21_5847'
+```
+
+```{r}
+census21 <- get_census(
+  dataset = 'CA21', 
+  regions = list(CSD = c("3520005")),
+  vectors = c("Bangladesh_2021" = Bangladesh_2021,
+              "Pakistan_2021" = Pakistan_2021,
+              "SriLanka_2021" = SriLanka_2021,
+              "India_2021" = India_2021,
+              "mhinc" = mhinc,
+              "avg_hv" = avg_homevalue,
+              "n_emp" = num_employed,
+              "ec_imm" = ec_imm,
+              "fam_imm" = fam_imm,
+              "bach" = bach),
+  level = 'CT',
+  use_cache = TRUE,
+  geo_format = 'sf') |> 
+  st_transform(crs = 26917) # project to nad 1983 zone 17n
+```
+
+```{r}
+census21$PK_IN = census21$Pakistan_2021+ census21$India_2021
+
+cols = c("Bangladesh_2021", "PK_IN", "Pakistan_2021", "SriLanka_2021", "India_2021", "n_emp", "ec_imm", "fam_imm", "bach")
+
+for (col in cols) {
+  census21[paste0(col, "_perc")] = (census21[[col]]/census21[["Population"]])*100
+}
+```
+
+```{r}
+scarbo = st_read("./toronto_muni.gpkg") |> 
+ st_transform(crs = 26917) |> # project to nad 1983 zone 17n 
+   filter(area_name == "SCARBOROUGH")
+
+health = st_read("./HealthServices.geojson") |> 
+  st_transform(crs = 26917) |> # units = metres
+  select(AGENCY_NAME, MUNICIPALITY, ELIGIBILITY, LEGAL_STATUS, LANGUAGES)
+
+health = health[!duplicated(health$geometry), ]
+
+health_vis = st_filter(health, scarbo)
+df_spat = st_filter(census21, scarbo, .predicate = st_intersects) |> 
+select("GeoUID", "PK_IN_perc", "Bangladesh_2021_perc", "Pakistan_2021_perc", "SriLanka_2021_perc", "India_2021_perc", "mhinc", "avg_hv", "n_emp_perc", "ec_imm_perc", "fam_imm_perc", "bach_perc", "India_2021", "ec_imm", 'Pakistan_2021','SriLanka_2021', 'Bangladesh_2021') |>
+  filter(!GeoUID %in% c('5350021.00', '5350022.00', '5350079.00',
+                        '5350180.00', '5350080.02', '5350190.01',
+                        '5350190.02', '5350191.00', '5350261.00',
+                        '5350262.01', '5350262.02', '5350271.01',
+                        '5350271.02', '5350270.01', '5350272.02',
+                        '5350301.04', '5350302.01', '5350302.02',
+                        '5350302.03', '5350324.03', '5350324.03',
+                        '5350324.03', '5350272.01'))
+
+df_spat = df_spat |> 
+  mutate(n_15m = lengths(st_within(df_spat$geometry, 
+                                        st_buffer(health, 1500))),
+         n_30m = lengths(st_within(df_spat$geometry, 
+                                        st_buffer(health, 3000))),
+         n_45m = lengths(st_within(df_spat$geometry, 
+                                        st_buffer(health, 4500))),
+         n_60m = lengths(st_within(df_spat$geometry, 
+                                        st_buffer(health, 6000))))
+
+df = df_spat |> 
+  select(-GeoUID) |> 
+  st_drop_geometry()
+
+df[is.na(df) | df=="Inf"] = NA
+```
+
+# Desc Stats
+
+```{r}
+datasummary_skim(df, output = "gt")
+```
+
+```{r}
+df |> 
+  select(India_2021_perc, Pakistan_2021_perc, SriLanka_2021_perc, Bangladesh_2021_perc, mhinc, ec_imm_perc, fam_imm_perc, bach_perc, n_45m) |> 
+  rename("% Indian Immigrant" = India_2021_perc,
+         "% Pakistani Immigrant" = Pakistan_2021_perc,
+         "% Sri Lankan Immigrant" = SriLanka_2021_perc,
+         "% Bangladeshi Immigrant" = Bangladesh_2021_perc,
+         "Median Household Income" = mhinc,
+         "% Economic Immigrant"  = ec_imm_perc,
+         "% Family Immigrant" = fam_imm_perc,
+         "% Bachelor's Degree +" = bach_perc) |> 
+  datasummary_skim(output = "gt")
+  #gtsave("indep_sumstats.html")
+```
+
+```{r}
+plot_correlation(df)
+```
+
+# Spatial Data Cleaning
+
+```{r}
+in_map = tm_shape(df_spat) + 
+  tm_polygons(col = "India_2021_perc", 
+              palette = "Blues",
+              title = "% Indian Immigrant",
+              style = "jenks") + #jenks for right skew
+  tm_layout(legend.position = c("right", "bottom"))+
+  tm_compass(position=c("left", "bottom"))
+
+pk_map = tm_shape(df_spat) + 
+  tm_polygons(col = "Pakistan_2021_perc", 
+              palette = "Greens",
+              title = "% Pakistani Immigrant",
+              style = "jenks") +  #quantile for a little bit of right skew
+  tm_layout(legend.position = c("right", "bottom"))+
+  tm_compass(position=c("left", "bottom"))
+
+sl_map = tm_shape(df_spat) +
+  tm_polygons(col = "SriLanka_2021_perc",
+              palette = "Oranges",
+              title = "% Sri Lankan Immigrant",
+              style = "jenks") + #quantile for visually normal distribution
+  tm_layout(legend.position = c("right", "bottom"))+
+  tm_compass(position=c("left", "bottom"))
+
+bd_map = tm_shape(df_spat) +
+  tm_polygons(col = "Bangladesh_2021_perc",
+              palette = "Reds",
+              title = "% Bangladeshi Immigrant",
+              style = "jenks") + #quantile for visually normal distribution
+  tm_layout(legend.position = c("right", "bottom"))+
+  tm_compass(position=c("left", "bottom"))
+
+mhinc_map = tm_shape(df_spat) +
+  tm_polygons(col = "mhinc",
+              palette = "Purples",
+              title = "Median Household Income ($)",
+              style = "jenks") + #quantile for visually normal distribution
+  tm_layout(legend.position = c("right", "bottom"))+
+  tm_compass(position=c("left", "bottom"))
+
+ec_map = tm_shape(df_spat) +
+  tm_polygons(col = "ec_imm_perc",
+              palette = "Oranges",
+              title = "% Economic Immigrant",
+              style = "quantile") + #quantile for visually normal distribution
+  tm_layout(legend.position = c("right", "bottom"))+
+  tm_compass(position=c("left", "bottom"))
+
+fam_map = tm_shape(df_spat) +
+  tm_polygons(col = "fam_imm_perc",
+              palette = "Blues",
+              title = "% Family Immigrant",
+              style = "quantile") + #quantile for visually normal distribution
+  tm_layout(legend.position = c("right", "bottom"))+
+  tm_compass(position=c("left", "bottom"))
+
+bach_map = tm_shape(df_spat) +
+  tm_polygons(col = "bach_perc",
+              palette = "Greens",
+              title = "% Bachelor's or Higher",
+              style = "jenks") + #quantile for visually normal distribution
+  tm_layout(legend.position = c("right", "bottom"))+
+  tm_compass(position=c("left", "bottom"))
+
+n45_map = tm_shape(df_spat) +
+  tm_polygons(col = "n_60m",
+              palette = "Reds",
+              title = "n_60m",
+              style = "quantile") + #quantile for visually normal distribution
+  tm_layout(legend.position = c("left", "bottom"))+
+  tm_compass(position=c("left", "top"))
+
+
+allvars_map = tmap_arrange(in_map, pk_map, sl_map, bd_map, mhinc_map, ec_map, fam_map, bach_map, n45_map)
+
+immvars_map = tmap_arrange(in_map, pk_map, sl_map, bd_map)
+
+# in_map
+# pk_map
+# sl_map
+# bd_map
+
+# mhinc_map
+# ec_map
+# fam_map
+bach_map
+```
+
+\
+
+```{r}
+df_sp = df_spat |> 
+  select(-n_15m, -n_emp_perc, -avg_hv) |> 
+  mutate(logIN = log(India_2021_perc),
+         logPK = log(Pakistan_2021_perc),
+         logSL = log(SriLanka_2021_perc),
+         logBD = log(Bangladesh_2021_perc),
+         logPKIN = log(PK_IN_perc))
+  
+  
+nb_queen <- sfdep::st_contiguity(df_sp, queen = TRUE)
+
+queen_W <- sfdep::st_weights(
+  nb = nb_queen, 
+  style = "W")
+
+nb_rook <- sfdep::st_contiguity(df_sp, queen = F)
+
+rook_W <- sfdep::st_weights(
+  nb = nb_rook, 
+  style = "W")
+
+df_sp <- df_sp |>
+  mutate(card_queen = sfdep::st_cardinalties(nb_queen),
+         nb = nb_queen,
+         wt = queen_W,
+         card_rook = sfdep::st_cardinalties(nb_rook),
+         nb_rook = nb_rook,
+         wt_rook = rook_W,
+         coords = st_centroid(df_sp$geometry))
+
+summary(df_sp$card_queen)
+```
+
+```{r}
+plot.new()
+plot(st_geometry(df_sp), border = "darkgray")
+plot.nb(spdep::poly2nb(df_sp, queen = TRUE), st_geometry(df_sp), lwd=.2, col="blue", cex = .5, add = TRUE)
+```
+
+```{r}
+plot.new()
+plot(st_geometry(df_sp), border = "darkgray")
+plot.nb(spdep::poly2nb(df_sp, queen = F), st_geometry(df_sp), lwd=.2, col="blue", cex = .5, add = TRUE)
+```
+
+```{r}
+in_i = sfdep::global_moran_test(
+  x = df_sp |> pull(India_2021_perc),
+  nb = df_sp |> pull(nb),
+  wt = df_sp |> pull(wt))
+
+pk_i = sfdep::global_moran_test(
+  x = df_sp |> pull(Pakistan_2021_perc),
+  nb = df_sp |> pull(nb),
+  wt = df_sp |> pull(wt))
+
+sl_i = sfdep::global_moran_test(
+  x = df_sp |> pull(SriLanka_2021_perc),
+  nb = df_sp |> pull(nb),
+  wt = df_sp |> pull(wt))
+
+bd_i = sfdep::global_moran_test(
+  x = df_sp |> pull(Bangladesh_2021_perc),
+  nb = df_sp |> pull(nb),
+  wt = df_sp |> pull(wt))
+
+pkin_i = sfdep::global_moran_test(
+  x = df_sp |> pull(PK_IN_perc),
+  nb = df_sp |> pull(nb),
+  wt = df_sp |> pull(wt))
+
+ecimm_i = sfdep::global_moran_test(
+  x = df_sp |> pull(ec_imm_perc),
+  nb = df_sp |> pull(nb),
+  wt = df_sp |> pull(wt))
+
+famimm_i = sfdep::global_moran_test(
+  x = df_sp |> pull(fam_imm_perc),
+  nb = df_sp |> pull(nb),
+  wt = df_sp |> pull(wt))
+
+mhinc_i = sfdep::global_moran_test(
+  x = df_sp |> pull(mhinc),
+  nb = df_sp |> pull(nb),
+  wt = df_sp |> pull(wt))
+
+bach_i = sfdep::global_moran_test(
+  x = df_sp |> pull(bach_perc),
+  nb = df_sp |> pull(nb),
+  wt = df_sp |> pull(wt))
+
+tab = matrix(rep(2, times=(9*2)), ncol=2, byrow=TRUE)
+colnames(tab) <- c("Moran's I", 'p-value')
+rownames(tab) = c("India", "Pakistan", "SriLanka","Bangladesh", "PK_IN", "Ec Imm",  "Mhinc", "Bach","Fam Imm")
+
+#[row, col]
+tab[1,1] = round(in_i$estimate |> pluck("Moran I statistic"),2) |> 
+  format(nsmall = 2)
+tab[2,1] = round(pk_i$estimate |> pluck("Moran I statistic"),2)
+tab[3,1] = round(sl_i$estimate |> pluck("Moran I statistic"), 2)
+tab[4,1] = round(bd_i$estimate |> pluck("Moran I statistic"),2) |> 
+  format(nsmall = 2)
+tab[5,1] = round(pkin_i$estimate |> pluck("Moran I statistic"),2)
+tab[6,1] = round(ecimm_i$estimate |> pluck("Moran I statistic"), 2)
+tab[7,1] = round(mhinc_i$estimate |> pluck("Moran I statistic"), 2)
+tab[8,1] = round(bach_i$estimate |> pluck("Moran I statistic"), 2)
+tab[9,1] = round(famimm_i$estimate |> pluck("Moran I statistic"), 2)
+
+tab[1,2] = format(in_i$p.value, digits = 3) 
+tab[2,2] = format(pk_i$p.value, digits = 3)
+tab[3,2] = format(sl_i$p.value, digits = 3)
+tab[4,2] = format(bd_i$p.value, digits = 3) 
+tab[5,2] = format(pkin_i$p.value, digits = 3)
+tab[6,2] = format(ecimm_i$p.value, digits = 3)
+tab[7,2] = format(mhinc_i$p.value, digits = 3)
+tab[8,2] = format(bach_i$p.value, digits = 3)
+tab[9,2] = format(famimm_i$p.value, digits = 3)
+
+tab <- as.table(tab)
+tab
+```
+
+# MLR
+
+```{r}
+df_SA = df |> 
+  select(-n_15m, -n_emp_perc, -avg_hv) |> 
+  mutate(logIN = log(India_2021_perc),
+         logPK = log(Pakistan_2021_perc),
+         logSL = log(SriLanka_2021_perc),
+         logBD = log(Bangladesh_2021_perc),
+         logPKIN = log(PK_IN_perc))
+
+# m_logSA = lm(n_60m ~ ec_imm_perc + mhinc + logIN + logSL + logPK + logBD + bach_perc, data = df_SA)
+# 
+# m_logPKIN = lm(n_60m ~ ec_imm_perc + mhinc + + logSL + logPKIN + logBD+ bach_perc, data = df_SA)
+
+m_SA = lm(n_60m ~ ec_imm_perc + mhinc + India_2021_perc + SriLanka_2021_perc + Pakistan_2021_perc + Bangladesh_2021_perc+ bach_perc, data = df_SA)
+
+m_SAfam = lm(n_60m ~ ec_imm_perc + mhinc + India_2021_perc + SriLanka_2021_perc + Pakistan_2021_perc + Bangladesh_2021_perc+ bach_perc + fam_imm_perc, data = df_SA)
+
+m_PKIN = lm(n_60m ~ ec_imm_perc + mhinc + PK_IN_perc + SriLanka_2021_perc  + Bangladesh_2021_perc+ bach_perc, data = df_SA)
+
+modelsummary(
+  list("SA" = m_SA, 
+       "PK" = m_PKIN,
+       "fam" = m_SAfam),
+  stars = TRUE,
+  output = "gt")
+```
+
+```{r}
+m_SA60 = lm(n_60m ~ ec_imm_perc + mhinc + India_2021_perc + SriLanka_2021_perc + Pakistan_2021_perc + Bangladesh_2021_perc+ bach_perc, data = df_SA)
+
+m_SAfam60 = lm(n_60m ~ ec_imm_perc + mhinc + India_2021_perc + SriLanka_2021_perc + Pakistan_2021_perc + Bangladesh_2021_perc+ bach_perc + fam_imm_perc, data = df_SA)
+
+m_SA45 = lm(n_45m ~ ec_imm_perc + mhinc + India_2021_perc + SriLanka_2021_perc + Pakistan_2021_perc + Bangladesh_2021_perc+ bach_perc, data = df_SA)
+
+m_SAfam45 = lm(n_45m ~ ec_imm_perc + mhinc + India_2021_perc + SriLanka_2021_perc + Pakistan_2021_perc + Bangladesh_2021_perc+ bach_perc + fam_imm_perc, data = df_SA)
+
+m_SA30 = lm(n_30m ~ ec_imm_perc + mhinc + India_2021_perc + SriLanka_2021_perc + Pakistan_2021_perc + Bangladesh_2021_perc+ bach_perc, data = df_SA)
+
+modelsummary(
+  list("SA60" = m_SA60, 
+       "SA60_fam" = m_SAfam60,
+       "SA45" = m_SA45, 
+       "SA45_fam" = m_SAfam45),
+  stars = TRUE,
+  output = "gt")
+```
+
+```{r}
+check_model(m_SAfam45, panel = FALSE) |> 
+  plot()
+```
+
+```{r}
+df_sp <- df_sp |> 
+  add_residuals(m_SAfam45, var = "ols_resid")
+
+global_moran_test(
+  x = df_sp |> pull(ols_resid),
+  nb = df_sp |> pull(nb),
+  wt = df_sp |> pull(wt),
+  zero.policy = TRUE
+)
+```
+
+```{r}
+mean(vif(m_SAfam45))
+```
+
+# Spatial Lag
+
+```{r}
+sp_w = recreate_listw(
+    nb = df_sp |> pull(nb),
+    wt = df_sp |> pull(wt))
+
+m_lag <- lagsarlm(
+  formula = n_45m ~ ec_imm_perc + mhinc + India_2021_perc + SriLanka_2021_perc + Pakistan_2021_perc + Bangladesh_2021_perc+ bach_perc + fam_imm_perc,
+  data = df_sp,
+  listw = sp_w) #spatial weight
+
+df_sp <- df_sp |> 
+  mutate(resid_slm = resid(m_lag))
+
+global_moran_test(
+  x = df_sp |> pull(resid_slm), 
+  nb = df_sp |> pull(nb),
+  wt = df_sp |> pull(wt))
+```
+
+# Spatial Error
+
+```{r}
+m_error <- errorsarlm(
+  formula = n_45m ~ ec_imm_perc + mhinc + India_2021_perc + SriLanka_2021_perc + Pakistan_2021_perc + Bangladesh_2021_perc+ bach_perc + fam_imm_perc, 
+  data = df_sp,
+  listw = sp_w)
+
+df_sp <- df_sp |> 
+  mutate(resid_sem = resid(m_error))
+
+global_moran_test(
+  x = df_sp |> pull(resid_sem), 
+  nb = df_sp |> pull(nb),
+  wt = df_sp |> pull(wt))
+```
+
+# Choose Model: SLR
+
+```{r}
+sarlm_mod <- function(mod){
+  mod <- list(
+    tidy = broom::tidy(mod),
+    glance = broom::glance(mod))
+  class(mod) <- "modelsummary_list"
+  return(mod)
+}
+
+modelsummary(list("OLS" = m_SAfam45,
+                  "SLM" = sarlm_mod(m_lag),
+                  "SEM" = sarlm_mod(m_error)), 
+             statistic = NULL,
+             stars = TRUE,
+             output = "gt")
+
+```
+
+```{r}
+lmTest = spdep::lm.LMtests(
+  model = m_SAfam45, 
+  listw = sp_w, 
+  test = c("LMlag", "LMerr", "RLMlag", "RLMerr")) 
+
+lmtab = matrix(rep(2, times=(4*3)), ncol=3, byrow=TRUE)
+colnames(lmtab) <- c("statistic", 'p-value', "")  
+rownames(lmtab) = c("LMlag", "LMerr", "RLMlag", "RLMerr")
+
+lmtab[1,1] = format(lmTest[["LMlag"]][["statistic"]][["LMlag"]], digits = 3) 
+lmtab[2,1] = format(lmTest[["LMerr"]][["statistic"]][["LMerr"]], digits = 3)
+lmtab[3,1] = format(lmTest[["RLMlag"]][["statistic"]][["RLMlag"]], digits = 3)
+lmtab[4,1] = format(lmTest[["RLMerr"]][["statistic"]][["RLMerr"]], digits = 3)
+
+lmtab[1,2] = format(lmTest[["LMlag"]][["p.value"]], digits = 3) 
+lmtab[2,2] = format(lmTest[["LMerr"]][["p.value"]], digits = 3)
+lmtab[3,2] = format(lmTest[["RLMlag"]][["p.value"]], digits = 3)
+lmtab[4,2] = format(lmTest[["RLMerr"]][["p.value"]], digits = 3)
+
+for(i in 1:nrow(lmtab)) {
+  if (lmtab[i, 2] < 0.01){
+    lmtab[i,3] = "**"
+  } else if (lmtab[i, 2] < 0.05){
+    lmtab[i,3] = "*"
+  } else if (lmtab[i, 2] < 0.1){
+    lmtab[i,3] = "+"
+  } else {
+    lmtab[i,3] = ""
+  }
+}
+
+lmtab <- as.table(lmtab)
+lmtab
+```
+
+# Spatial Lag Results
+
+```{r}
+impacts(obj = m_lag, listw = sp_w)
+```
+
+```{r}
+df_vis = df_spat |> 
+  rename("# of Indian Immigrants \n by census tract" = India_2021,
+         "# of Pakistani Immigrants \n by census tract" = Pakistan_2021,
+         "# of Sri Lankan Immigrants \n by census tract" = SriLanka_2021,
+         "# of Bangladeshi Immigrants \n by census tract" = Bangladesh_2021)
+
+inac_map = tm_shape(df_vis) +
+  tm_polygons(title = "# of Healthcare Facilities \nWithin 4.5 km",
+              col = "n_45m",
+              palette = c("#ffffff",
+                          "#f7f7f7",
+                          "#d9d9d9",
+                          "#bdbdbd", 
+                          "#969696", 
+                          "#636363"),
+              style = "cat",
+              border.col = "#737070") +
+  tm_layout(legend.position = c("right", "bottom")) +
+  tm_compass(position=c("right", "bottom")) +
+tm_shape(df_vis) +
+  tm_dots(size = "# of Indian Immigrants \n by census tract", 
+          col = "orange", 
+          style = 'jenks',
+          alpha = 0.5,
+          title = "# of Indian Immigrants \n by census tract") +
+tm_layout(main.title = "Indian Immigrant Access to Healthcare",
+          title.snap.to.legend = FALSE,
+          frame = F,
+          legend.outside = T) 
+
+inac_map
+```
+
+```{r}
+#tmap_save(inac_map, "inac_map.png")
+```
